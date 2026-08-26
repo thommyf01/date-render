@@ -10,9 +10,10 @@ Publieke repo = onbeperkte gratis GitHub Actions-minuten.
    - `render_city.py`: OSM-data ophalen (`export_osm.py`) -> Blender headless (`export_glb.py`
      voor de `.glb`, `render_blender.py` voor de poster) -> WebP.
    - checkt de privé-site `website-git` uit, zet de nieuwe `.glb` + poster + `locations.json`
-     erin, commit terug en deployt naar Cloudflare Pages.
+     erin en **commit + pusht** dat terug (half-automatisch: de CI deployt NIET zelf).
    - meldt de status (`ready`/`error`) terug aan de site (`/api/render-status`).
 3. Cloudflare start automatisch de volgende stad uit de wachtrij (max. 1 tegelijk).
+4. Publiceren doe je zelf: `git pull` in de site-repo + `deploy.ps1` (die heeft de foto's lokaal).
 
 ## Scripts
 - `render_city.py` - orchestrator (payload -> .glb + poster).
@@ -21,8 +22,8 @@ Publieke repo = onbeperkte gratis GitHub Actions-minuten.
 - `publish.py` - kopieert de output naar de site-checkout + upsert `locations.json`.
 
 ## Secrets (Settings -> Secrets -> Actions)
-`CF_TOKEN`, `CF_ACCOUNT_ID`, `RENDER_CALLBACK_SECRET`, `CALLBACK_URL`, `SITE_REPO_TOKEN`.
-Zie `Planning/PROVISIONING-date-editor.md` in de site-repo.
+`RENDER_CALLBACK_SECRET`, `CALLBACK_URL`, `SITE_REPO_TOKEN`.
+(Geen CF-token nodig: de CI deployt niet zelf.) Zie `Planning/PROVISIONING-date-editor.md`.
 
 ## Lokaal testen
 ```bash
