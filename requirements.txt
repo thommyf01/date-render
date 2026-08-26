@@ -1,0 +1,9 @@
+# Voor export_osm.py (OSM -> scene JSON). Blender heeft z'n eigen Python.
+osmnx==2.0.7
+shapely
+pyproj
+numpy
+requests
+geopandas
+scipy
+pillow

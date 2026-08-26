@@ -1,0 +1,97 @@
+name: render-city
+
+on:
+  repository_dispatch:
+    types: [render-city]
+
+# Extra vangnet naast de KV-wachtrij: nooit twee renders tegelijk.
+concurrency:
+  group: render-city
+  cancel-in-progress: false
+
+env:
+  BLENDER_VERSION: "5.1.2"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Render-repo uitchecken
+        uses: actions/checkout@v4
+
+      - name: Payload wegschrijven
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: printf '%s' "$PAYLOAD" > payload.json
+
+      - name: Python + deps
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Blender installeren
+        run: |
+          set -e
+          MAJOR=$(echo "$BLENDER_VERSION" | cut -d. -f1,2)
+          url="https://download.blender.org/release/Blender${MAJOR}/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "download $url"
+          wget -q "$url"
+          tar xf "blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "$PWD/blender-${BLENDER_VERSION}-linux-x64" >> "$GITHUB_PATH"
+
+      - name: Renderen
+        run: BLENDER=blender python render_city.py --payload payload.json
+
+      - name: Site uitchecken (privé)
+        uses: actions/checkout@v4
+        with:
+          repository: thommyf01/website-git
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+          path: site
+
+      - name: Assets + locations.json bijwerken
+        run: python publish.py
+
+      - name: Terugcommitten naar de site-repo
+        working-directory: site
+        run: |
+          git config user.name "date-render bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "geen wijzigingen"
+          else
+            SLUG=$(python -c "import json;print(json.load(open('../payload.json'))['slug'])")
+            git commit -m "Auto-render: $SLUG"
+            git push
+          fi
+
+      - name: Deploy naar Cloudflare
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@latest pages deploy portfolio --project-name thom-fotografie --branch main --commit-dirty=true
+
+      - name: Status terug op 'ready'
+        if: success()
+        env:
+          CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+          RENDER_CALLBACK_SECRET: ${{ secrets.RENDER_CALLBACK_SECRET }}
+        run: |
+          SLUG=$(python -c "import json;print(json.load(open('payload.json'))['slug'])")
+          curl -fsS -X POST "$CALLBACK_URL" -H "X-Secret: $RENDER_CALLBACK_SECRET" \
+            -H "Content-Type: application/json" -d "{\"slug\":\"$SLUG\",\"status\":\"ready\"}"
+
+      - name: Status terug op 'error'
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+          RENDER_CALLBACK_SECRET: ${{ secrets.RENDER_CALLBACK_SECRET }}
+        run: |
+          SLUG=$(python -c "import json;print(json.load(open('payload.json'))['slug'])" || echo unknown)
+          curl -fsS -X POST "$CALLBACK_URL" -H "X-Secret: $RENDER_CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"slug\":\"$SLUG\",\"status\":\"error\",\"error\":\"workflow-failed\"}" || true

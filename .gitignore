@@ -1,0 +1,14 @@
+# Runtime-output (regenereerbaar)
+out/
+data/
+payload.json
+site/
+
+# Blender-download in CI
+blender-*/
+*.tar.xz
+
+__pycache__/
+
+# osmnx-cache (runtime)
+cache/
