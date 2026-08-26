@@ -29,10 +29,11 @@ THUMB_MAX, LARGE_MAX = 900, 1800
 THUMB_Q, LARGE_Q = 80, 82
 
 
-def run_blender(script, scene, out, extra_env=None):
+def run_blender(script, scene, out, defaults=None):
+    # defaults vullen alleen gaten; per-stad renderOpts (al in os.environ) winnen.
     env = dict(os.environ)
-    if extra_env:
-        env.update(extra_env)
+    for k, v in (defaults or {}).items():
+        env.setdefault(k, v)
     cmd = [BLENDER, "-b", "-P", str(HERE / script), "--", str(scene), str(out)]
     print("  >", " ".join(str(c) for c in cmd), flush=True)
     r = subprocess.run(cmd, env=env, cwd=str(HERE))
@@ -70,6 +71,12 @@ def main():
 
     out = HERE / "out"
     out.mkdir(exist_ok=True)
+
+    # Per-stad render-instellingen (framing/look) toepassen als env VOOR de import,
+    # zodat export_osm (MARGIN_M/MAX_R/BAG) en de Blender-runs (FIT_ALL/BRIDGE/...) ze zien.
+    # Zo houdt een re-render dezelfde uitsnede als het origineel.
+    for k, v in (data.get("renderOpts") or {}).items():
+        os.environ[str(k)] = str(v)
 
     # BAG-dakhoogtes aan vóór de import (export_osm leest BAG bij het laden).
     # Buiten NL geeft de BAG-API simpelweg geen data -> valt terug op OSM-levels.
