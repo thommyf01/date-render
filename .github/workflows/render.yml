@@ -51,10 +51,10 @@ jobs:
           token: ${{ secrets.SITE_REPO_TOKEN }}
           path: site
 
-      - name: Assets + locations.json bijwerken
+      - name: Render-assets + locations.json in de site zetten
         run: python publish.py
 
-      - name: Publiceren naar de site-repo (commit + push)
+      - name: Renders terugcommitten naar de site-repo
         working-directory: site
         run: |
           git config user.name "date-render bot"
@@ -67,8 +67,16 @@ jobs:
             git commit -m "Auto-render: $SLUG"
             git push
           fi
-      # Half-automatisch: geen deploy hier. De nieuwe stad staat nu in website-git.
-      # Publiceren doe je lokaal met: git pull + deploy.ps1 (die heeft de foto's).
+
+      - name: Huidige live-foto's ophalen (blijven uit git)
+        run: python fetch_live_photos.py
+
+      - name: Deploy naar Cloudflare (complete site incl. foto's)
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@latest pages deploy portfolio --project-name thom-fotografie --branch main --commit-dirty=true
 
       - name: Status terug op 'ready'
         if: success()
