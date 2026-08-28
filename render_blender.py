@@ -173,7 +173,7 @@ mat_bld   = make_material("Buildings", C_BLD, 0.75, emit=0.12, emit_rgb=C_BLD)
 # Kustlocatie: alleen de ZEE (zeewaarts vlak) wordt blauw; de grond blijft grijs
 # zodat wegen/gaten op het land niet blauw worden.
 COASTAL_SLUGS = {"denhaag"}
-_coastal = data.get("slug") in COASTAL_SLUGS
+_coastal = data.get("slug") in COASTAL_SLUGS or os.environ.get("COASTAL", "0") == "1"
 mat_ground = make_material("Ground", C_GROUND, 0.85)
 mat_sea   = make_material("Sea", (0.10, 0.34, 0.55), 0.4)
 mat_water = make_material("Water", C_WATER, 0.25)

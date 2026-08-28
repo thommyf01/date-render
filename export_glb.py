@@ -156,7 +156,7 @@ mat_bridge = make_material("Bridge", C_BRIDGE, 0.75)
 mat_heart = make_material("DateSpot", C_HEART, 0.4)
 
 COASTAL_SLUGS = {"denhaag"}
-_coastal = slug in COASTAL_SLUGS
+_coastal = slug in COASTAL_SLUGS or os.environ.get("COASTAL", "0") == "1"
 
 # ── gebouwen als één mesh ──
 bm = bmesh.new()
