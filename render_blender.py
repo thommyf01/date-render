@@ -319,13 +319,20 @@ if _coastal and sand and buildings:
               for b in buildings) / len(buildings)
     if nx * (bxc - mx) + ny * (byc - my) > 0:   # normaal moet WEG van gebouwen wijzen
         nx, ny = -nx, -ny
-    # Scheidingslijn dwars door het midden van het zandstrook: de naad ligt onder het
-    # zand (dat er overheen wordt getekend), dus géén grijze wig en géén blauw op land.
+    # Naad ZEEWAARTS van alle gebouwen (niet op het zand-zwaartepunt). Bij een diep
+    # strand (bv. Knokke) ligt dat zwaartepunt ver in zee -> een naad daar snijdt dwars
+    # door de stad en zet gebouwen onder blauw. De zeewaartse gebouwrand (max projectie
+    # op de zee-normaal, +30m) garandeert dat geen enkel gebouw onder blauw komt; het
+    # zand wordt hoger getekend en dekt het strand tot aan het water.
+    edge = max(nx * (sum(p[0] for p in b["ring"]) / len(b["ring"]) - mx) +
+               ny * (sum(p[1] for p in b["ring"]) / len(b["ring"]) - my)
+               for b in buildings) + 30.0
+    ox, oy = mx + nx * edge, my + ny * edge
     BIG = extent * 6
-    quad = [(mx + tx * BIG, my + ty * BIG),
-            (mx - tx * BIG, my - ty * BIG),
-            (mx - tx * BIG + nx * BIG, my - ty * BIG + ny * BIG),
-            (mx + tx * BIG + nx * BIG, my + ty * BIG + ny * BIG)]
+    quad = [(ox + tx * BIG, oy + ty * BIG),
+            (ox - tx * BIG, oy - ty * BIG),
+            (ox - tx * BIG + nx * BIG, oy - ty * BIG + ny * BIG),
+            (ox + tx * BIG + nx * BIG, oy + ty * BIG + ny * BIG)]
     build_flat([quad], 0.05, mat_sea, "Sea")
 
 # ── Zand (strand/duin) — boven de zee ──

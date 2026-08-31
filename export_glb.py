@@ -278,10 +278,17 @@ if _coastal and sand and buildings:
     byc = sum(sum(p[1] for p in b["ring"])/len(b["ring"]) for b in buildings)/len(buildings)
     if nx*(bxc-smx) + ny*(byc-smy) > 0:
         nx, ny = -nx, -ny
-    BIG = max(maxx - minx, maxy - miny) * 1.5
-    quad = [(smx + tx*BIG, smy + ty*BIG), (smx - tx*BIG, smy - ty*BIG),
-            (smx - tx*BIG + nx*BIG, smy - ty*BIG + ny*BIG),
-            (smx + tx*BIG + nx*BIG, smy + ty*BIG + ny*BIG)]
+    # Naad ZEEWAARTS van alle gebouwen (niet op het zand-zwaartepunt): bij een diep
+    # strand (Knokke) ligt dat zwaartepunt ver in zee -> naad snijdt door de stad. De
+    # zeewaartse gebouwrand (+30m) voorkomt dat er gebouwen onder blauw komen.
+    edge = max(nx * (sum(p[0] for p in b["ring"]) / len(b["ring"]) - smx) +
+               ny * (sum(p[1] for p in b["ring"]) / len(b["ring"]) - smy)
+               for b in buildings) + 30.0
+    ox, oy = smx + nx * edge, smy + ny * edge
+    BIG = max(maxx - minx, maxy - miny) * 3.0
+    quad = [(ox + tx*BIG, oy + ty*BIG), (ox - tx*BIG, oy - ty*BIG),
+            (ox - tx*BIG + nx*BIG, oy - ty*BIG + ny*BIG),
+            (ox + tx*BIG + nx*BIG, oy + ty*BIG + ny*BIG)]
     build_flat([quad], 0.05, mat_sea, "Sea")
 
 if sand:
