@@ -26,6 +26,9 @@ TREES  = os.environ.get("TREES", "1") == "1"
 FOREST = os.environ.get("FOREST", "1") == "1"
 FIT_ALL = os.environ.get("FIT_ALL", "0") == "1"
 BRIDGE = os.environ.get("BRIDGE", "0") == "1"
+TERRAIN = os.environ.get("TERRAIN", "0") == "1"
+TEXAG   = float(os.environ.get("TEXAG", 2.2))         # bergen: zelfde overdrijving als de render
+GLB_TEX = int(os.environ.get("GLB_TEX", 1600))        # textuurgrootte terrein in de .glb (px)
 
 EXAG       = 3.2          # zelfde hoogte-overdrijving als de render (look matcht)
 HMAX_M     = 80
@@ -70,7 +73,7 @@ def add_cap(bm, ring, z, want_up):
             fc.normal_flip()
 
 
-def extrude_ring(bm, ring, h):
+def extrude_ring(bm, ring, h, z0=0.0):
     if ring and ring[0] == ring[-1]:
         ring = ring[:-1]
     if len(ring) < 3:
@@ -78,9 +81,9 @@ def extrude_ring(bm, ring, h):
     bcx = sum(p[0] for p in ring) / len(ring)
     bcy = sum(p[1] for p in ring) / len(ring)
     add_cap(bm, ring, h, want_up=True)
-    add_cap(bm, ring, 0.0, want_up=False)
+    add_cap(bm, ring, z0, want_up=False)
     top = [bm.verts.new((x, y, h)) for x, y in ring]
-    bot = [bm.verts.new((x, y, 0.0)) for x, y in ring]
+    bot = [bm.verts.new((x, y, z0)) for x, y in ring]
     n = len(ring)
     for i in range(n):
         j = (i + 1) % n
@@ -132,6 +135,25 @@ print(f"[glb] {slug}: {len(buildings)} geb, {len(water)} water, {len(green)} gro
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
 
+# ── hoogtenet (TERRAIN=1 + terrain-data in de scene) ──
+terrain = data.get("terrain") if TERRAIN else None
+if terrain:
+    _tn, _th, _tstep = terrain["n"], terrain["half"], terrain["step"]
+    _tz = [v * TEXAG for v in terrain["z"]]
+
+
+def tz(x, y):
+    """Terreinhoogte (m, overdreven) op lokale (x, y); 0 zonder terrein."""
+    if not terrain:
+        return 0.0
+    fx = min(max((x + _th) / _tstep, 0.0), _tn - 1.001)
+    fy = min(max((y + _th) / _tstep, 0.0), _tn - 1.001)
+    i, j = int(fx), int(fy)
+    ax, ay = fx - i, fy - j
+    z = _tz
+    return (z[j * _tn + i] * (1 - ax) * (1 - ay) + z[j * _tn + i + 1] * ax * (1 - ay) +
+            z[(j + 1) * _tn + i] * (1 - ax) * ay + z[(j + 1) * _tn + i + 1] * ax * ay)
+
 
 def make_material(name, rgb, rough=0.8):
     """Web-PBR: baseColor + roughness, metallic 0, geen emissie."""
@@ -166,7 +188,12 @@ for b in buildings:
     for x, y in ring:
         minx = min(minx, x); maxx = max(maxx, x)
         miny = min(miny, y); maxy = max(maxy, y)
-    extrude_ring(bm, ring, min(b["h"], HMAX_M) * EXAG)
+    hb = min(b["h"], HMAX_M) * EXAG
+    zb, zc = 0.0, 0.0
+    if terrain:      # ingegraven tot onder de laagste hoek, dak boven het gemiddelde
+        zs = [tz(x, y) for x, y in ring]
+        zb, zc = min(zs) - 4.0, sum(zs) / len(zs)
+    extrude_ring(bm, ring, zc + hb, z0=zb)
 mesh = bpy.data.meshes.new("BuildingsMesh")
 bm.to_mesh(mesh); bm.free()
 obj = bpy.data.objects.new("Buildings", mesh)
@@ -210,6 +237,10 @@ print(f"[glb] extent {extent:.0f}m, centrum ({cx:.0f},{cy:.0f}), MSCALE {MSCALE:
 # de bounding box de stad volgt en niets ver van de origin staat.
 _cm = max(150.0, 0.12 * max(maxx - minx, maxy - miny))
 CROP = (minx - _cm, miny - _cm, maxx + _cm, maxy + _cm)
+if terrain:   # bergen: uitsnede ruim rond het frame-centrum (binnen het hoogtenet)
+    _hc = min(float(os.environ.get("TERRAIN_EXTENT", 4500)) * 0.75, _th - 2 * _tstep)
+    CROP = (min(CROP[0], max(cx - _hc, -_th + _tstep)), min(CROP[1], max(cy - _hc, -_th + _tstep)),
+            max(CROP[2], min(cx + _hc, _th - _tstep)), max(CROP[3], min(cy + _hc, _th - _tstep)))
 
 
 def clip_ring(ring, box):
@@ -260,10 +291,49 @@ def build_flat(rings, z, mat, name, clip=True):
 # ── ground: nette rechthoek op exact de crop (geen giant plane) ──
 gx0, gy0, gx1, gy1 = CROP
 ground = [(gx0, gy0), (gx1, gy0), (gx1, gy1), (gx0, gy1)]
-build_flat([ground], -0.2, mat_ground, "Ground", clip=False)
+if terrain:
+    # hoogtenet op de crop, kleurtextuur (verkleind) als baseColor
+    i0, i1 = int((gx0 + _th) / _tstep), int((gx1 + _th) / _tstep) + 1
+    j0, j1 = int((gy0 + _th) / _tstep), int((gy1 + _th) / _tstep) + 1
+    tbm_ = bmesh.new()
+    _vs = {}
+    for j in range(j0, j1 + 1):
+        for i in range(i0, i1 + 1):
+            _vs[(i, j)] = tbm_.verts.new((-_th + i * _tstep, -_th + j * _tstep, _tz[j * _tn + i]))
+    for j in range(j0, j1):
+        for i in range(i0, i1):
+            tbm_.faces.new([_vs[(i, j)], _vs[(i + 1, j)], _vs[(i + 1, j + 1)], _vs[(i, j + 1)]])
+    uv = tbm_.loops.layers.uv.new("UVMap")
+    for f in tbm_.faces:
+        for l in f.loops:
+            l[uv].uv = ((l.vert.co.x + _th) / (2 * _th), (l.vert.co.y + _th) / (2 * _th))
+    tmesh_ = bpy.data.meshes.new("Terrain")
+    tbm_.to_mesh(tmesh_); tbm_.free()
+    for p_ in tmesh_.polygons:
+        p_.use_smooth = True
+    mat_terrain = bpy.data.materials.new("Terrain")
+    mat_terrain.use_nodes = True
+    _bsdf = mat_terrain.node_tree.nodes.get("Principled BSDF")
+    _bsdf.inputs["Roughness"].default_value = 0.9
+    _bsdf.inputs["Metallic"].default_value = 0.0
+    _img = bpy.data.images.load(os.path.join(os.path.dirname(scene_path), terrain["cover"]))
+    if max(_img.size) > GLB_TEX:
+        _img.scale(GLB_TEX, GLB_TEX)
+    _tex = mat_terrain.node_tree.nodes.new("ShaderNodeTexImage")
+    _tex.image = _img
+    mat_terrain.node_tree.links.new(_tex.outputs["Color"], _bsdf.inputs["Base Color"])
+    tmesh_.materials.append(mat_terrain)
+    scene.collection.objects.link(bpy.data.objects.new("Terrain", tmesh_))
+    print(f"[glb] terrein {i1 - i0}x{j1 - j0} cellen, reliëf {max(_tz):.0f} m")
+else:
+    build_flat([ground], -0.2, mat_ground, "Ground", clip=False)
 
 # ── zee (kustlocaties): half-vlak op de crop, oriëntatie via PCA op het zand ──
-if _coastal and sand and buildings:
+if _coastal and data.get("sea") and not terrain:
+    build_flat([z["ring"] for z in data["sea"]], 0.05, mat_sea, "Sea")
+    if data.get("shore"):
+        build_flat([z["ring"] for z in data["shore"]], 0.13, mat_sand, "Shore")
+elif _coastal and sand and buildings and not terrain:
     spts = [p for s in sand for p in s["ring"]]
     n = len(spts)
     smx = sum(p[0] for p in spts) / n; smy = sum(p[1] for p in spts) / n
@@ -291,13 +361,14 @@ if _coastal and sand and buildings:
             (ox + tx*BIG + nx*BIG, oy + ty*BIG + ny*BIG)]
     build_flat([quad], 0.05, mat_sea, "Sea")
 
-if sand:
-    build_flat([s["ring"] for s in sand], 0.12, mat_sand, "Sand")
-if GREEN:
-    build_flat([g["ring"] for g in green], 0.08, mat_green, "Green")
-    if FOREST:
-        build_flat([f["ring"] for f in forest], 0.085, mat_forest, "Forest")
-build_flat([w["ring"] for w in water], WATER_Z, mat_water, "Water")
+if not terrain:     # bij terrein zit dit al in de kleurtextuur
+    if sand:
+        build_flat([s["ring"] for s in sand], 0.12, mat_sand, "Sand")
+    if GREEN:
+        build_flat([g["ring"] for g in green], 0.08, mat_green, "Green")
+        if FOREST:
+            build_flat([f["ring"] for f in forest], 0.085, mat_forest, "Forest")
+    build_flat([w["ring"] for w in water], WATER_Z, mat_water, "Water")
 
 # ── bruggen (Rotterdam) ──
 if BRIDGE and bridge:
@@ -316,9 +387,10 @@ if BRIDGE and bridge:
 if TREES and trees:
     tbm = bmesh.new()
     for tx, ty in trees:
-        apex = tbm.verts.new((tx, ty, 11.0))
+        zt = tz(tx, ty)
+        apex = tbm.verts.new((tx, ty, zt + 11.0))
         ring = [tbm.verts.new((tx + 3.2*math.cos(2*math.pi*k/6),
-                               ty + 3.2*math.sin(2*math.pi*k/6), 0.3)) for k in range(6)]
+                               ty + 3.2*math.sin(2*math.pi*k/6), zt + 0.3)) for k in range(6)]
         for k in range(6):
             try: tbm.faces.new([apex, ring[k], ring[(k+1) % 6]])
             except ValueError: pass
@@ -333,8 +405,10 @@ if TREES and trees:
 def building_height_at(px, py):
     for b in buildings:
         if point_in_ring(px, py, b["ring"]):
-            return min(b["h"], HMAX_M) * EXAG, b["ring"]
-    return 0.0, None
+            r_ = b["ring"]
+            zc_ = (sum(tz(x, y) for x, y in r_) / len(r_)) if terrain else 0.0
+            return zc_ + min(b["h"], HMAX_M) * EXAG, b["ring"]
+    return tz(px, py), None
 
 
 def add_heart(x, y, z0, scale=1.0):
@@ -453,7 +527,7 @@ for o in list(scene.collection.objects):
 
 # ── centreren op de origin: gebruik het echte geometrie-zwaartepunt (XY) zodat
 # het model altijd netjes rond de origin staat (handover-eis: geen offset). ──
-glo = [1e9, 1e9]; ghi = [-1e9, -1e9]
+glo = [1e9, 1e9]; ghi = [-1e9, -1e9]; gzmin = 1e9
 for o in scene.collection.objects:
     if o.type != "MESH":
         continue
@@ -461,16 +535,20 @@ for o in scene.collection.objects:
         w = o.matrix_world @ Vector(c)
         glo[0] = min(glo[0], w.x); ghi[0] = max(ghi[0], w.x)
         glo[1] = min(glo[1], w.y); ghi[1] = max(ghi[1], w.y)
+        gzmin = min(gzmin, w.z)
 gctrx = (glo[0] + ghi[0]) / 2; gctry = (glo[1] + ghi[1]) / 2
 for o in scene.collection.objects:
     o.location.x -= gctrx
     o.location.y -= gctry
+    if terrain:                     # laagste punt van het terrein op z=0 (handover-eis: grond op 0)
+        o.location.z -= gzmin
 
 # ── exporteren: GLB + DRACO, +Y up, geen camera's/lampen ──
 bpy.ops.object.select_all(action="SELECT")
 bpy.ops.export_scene.gltf(
     filepath=out_path, export_format="GLB", use_selection=True,
     export_yup=True, export_apply=True, export_cameras=False, export_lights=False,
+    export_image_format="JPEG", export_jpeg_quality=82,
     export_draco_mesh_compression_enable=True, export_draco_mesh_compression_level=6,
     export_draco_position_quantization=12, export_draco_normal_quantization=8,
 )

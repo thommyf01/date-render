@@ -276,18 +276,30 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
     def srgb(c):
         return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
 
-    # Basiskleur per pixel uit hoogte + helling: laag = licht groen-crème, hoog/steil = rots.
+    # Basiskleur per pixel uit DEM (werkt zonder OSM-landuse): bos onder de boomgrens en op
+    # niet-te-steile grond, weide/alpine erboven, rots op steile hellingen. Bospatronen krijgen
+    # laagfrequente ruis zodat het geen egaal vlak wordt; OSM-polygonen komen er later overheen.
     gy, gx = np.gradient(h, step)
     slope = np.degrees(np.arctan(np.hypot(gx, gy)))
-    h_c = float(h[h.shape[0] // 2, h.shape[1] // 2])
+    treeline = float(os.environ.get("TREELINE", max(300.0, 2600.0 - 55.0 * (abs(clat) - 30.0))))
+
     def to_tex(a):   # raster (rij j = y oplopend) -> textuurgrootte, rij 0 = noord
         im_ = Image.fromarray(a.astype(np.float32), mode="F").resize((S, S), Image.BILINEAR)
         return np.asarray(im_)[::-1]
-    rock_w = np.clip((to_tex(slope) - 26) / 14, 0, 1)
-    alt_w = np.clip((to_tex(h) - (h_c + 200)) / 500, 0, 1)
+    hh = to_tex(h)
+    sl = to_tex(slope)
+    seed = sum(ord(ch) for ch in slug)
+    noise = np.random.default_rng(seed).random((40, 40)).astype(np.float32)
+    noise = np.asarray(Image.fromarray(noise, mode="F").resize((S, S), Image.BICUBIC))
+    noise = (noise - noise.min()) / (np.ptp(noise) + 1e-6)
+    patch = np.clip((noise - 0.30) / 0.25, 0, 1)
+    forest_w = np.clip((treeline - hh) / 150, 0, 1) * np.clip((40 - sl) / 8, 0, 1) * (0.35 + 0.65 * patch)
+    alpine_w = np.clip((hh - (treeline - 150)) / 350, 0, 1)
+    rock_w = np.clip((sl - 28) / 14, 0, 1)
     lin = lambda c: np.array(c, dtype=np.float32)
-    low = 0.55 * lin(C["ground"]) + 0.45 * lin(C["green"])      # weide-achtig laag
-    colr = low[None, None, :] * (1 - alt_w[..., None]) + lin(C["ground"])[None, None, :] * alt_w[..., None]
+    meadow = 0.5 * lin(C["ground"]) + 0.5 * lin(C["green"])
+    colr = meadow[None, None, :] * (1 - alpine_w[..., None]) + lin(C["ground"])[None, None, :] * alpine_w[..., None]
+    colr = colr * (1 - forest_w[..., None]) + lin(C["forest"])[None, None, :] * forest_w[..., None]
     colr = colr * (1 - 0.8 * rock_w[..., None]) + lin(C["rock"])[None, None, :] * 0.8 * rock_w[..., None]
     im = Image.fromarray(np.clip(255 * colr ** (1 / 2.2), 0, 255).astype(np.uint8), "RGB")
     dr = ImageDraw.Draw(im)
@@ -298,24 +310,9 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
             if len(pts) >= 3:
                 dr.polygon(pts, fill=srgb(C[col]))
 
-    # Landbedekking: 1 gecombineerde Overpass-call over het hele terrein (i.p.v. veel losse).
-    gdf = fetch(clat, clon, int(half), {
-        "landuse": ["forest", "grass", "meadow", "farmland", "recreation_ground"],
-        "natural": ["wood", "scrub", "grassland", "heath", "water", "sand", "beach"]})
-    groups = {"green": [], "forest": [], "sand": [], "water": []}
-    for _, row in gdf.iterrows():
-        nat, lu = str(row.get("natural")), str(row.get("landuse"))
-        if nat == "water": key = "water"
-        elif nat in ("sand", "beach"): key = "sand"
-        elif nat == "wood" or lu == "forest": key = "forest"
-        else: key = "green"
-        groups[key].append(row.geometry)
-    import geopandas as gpd
-    for key in ("green", "forest", "sand", "water"):          # volgorde = laagvolgorde
-        if groups[key]:
-            paint(collect_rings(gpd.GeoDataFrame(geometry=groups[key]), clat, clon), key)
-    # ook wat de scene al had (stadsgebied, betrouwbaar) eroverheen
-    for key in ("green", "sand", "forest", "water"):
+    # OSM levert alleen water en zand (scherp afgebakend, al opgehaald voor de stad). Bos/gras
+    # komt uit de hoogtedata: OSM-landuse stopt bij de fetch-straal en geeft een harde rand.
+    for key in ("sand", "water"):
         paint([it["ring"] for it in layers.get(key, [])], key)
     tex = f"cover_{slug}.png"
     im.save(os.path.join(ddir, tex))
