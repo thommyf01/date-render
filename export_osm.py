@@ -195,6 +195,248 @@ def fetch_bag_heights(clat, clon, radius):
     return np.column_stack([cxs, cys]), np.array(hs)
 
 
+# ── Bergterrein (TERRAIN=1) ──────────────────────────────────────────────
+# Hoogtes uit de gratis AWS Terrain Tiles (Terrarium-PNG, wereldwijd, geen key).
+# Landbedekking (bos/gras/water/rots...) wordt als kleurtextuur (PNG) bij de scene
+# opgeslagen, die Blender op het hoogtenet plakt.
+TERRAIN_STEP = float(os.environ.get("TERRAIN_STEP", 20))    # meter per gridcel
+TERRAIN_ZOOM = int(os.environ.get("TERRAIN_ZOOM", 13))
+DEM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+
+
+def _tile_xy(lat, lon, z):
+    n = 2 ** z
+    x = (lon + 180.0) / 360.0 * n
+    y = (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n
+    return x, y
+
+
+def _get_tile(url, tries=4):
+    for k in range(tries):
+        try:
+            r = requests.get(url, timeout=60, headers={"User-Agent": "date-render/1.0"})
+            r.raise_for_status()
+            return r
+        except requests.RequestException:
+            if k == tries - 1:
+                raise
+
+
+def fetch_dem_grid(clat, clon, half, step):
+    """Regelmatig raster (n x n) met hoogtes in m; rij j = y van -half..+half,
+    kolom i = x van -half..+half (lokale meters, zelfde assen als de scene)."""
+    from PIL import Image
+    import io
+    n = int(round(2 * half / step)) + 1
+    xs = np.linspace(-half, half, n)
+    lons = clon + xs / (111_320 * math.cos(math.radians(clat)))
+    lats = clat + xs / 111_320
+    z = TERRAIN_ZOOM
+    tx0, ty1 = _tile_xy(lats[0], lons[0], z)       # zuidwest
+    tx1, ty0 = _tile_xy(lats[-1], lons[-1], z)     # noordoost
+    x_lo, x_hi = int(math.floor(tx0)) - 1, int(math.floor(tx1)) + 1
+    y_lo, y_hi = int(math.floor(ty0)) - 1, int(math.floor(ty1)) + 1
+    mosaic = np.zeros(((y_hi - y_lo + 1) * 256, (x_hi - x_lo + 1) * 256), dtype=np.float32)
+    for ty in range(y_lo, y_hi + 1):
+        for tx in range(x_lo, x_hi + 1):
+            r = _get_tile(DEM_URL.format(z=z, x=tx, y=ty))
+            a = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"), dtype=np.float32)
+            mosaic[(ty - y_lo) * 256:(ty - y_lo + 1) * 256,
+                   (tx - x_lo) * 256:(tx - x_lo + 1) * 256] = a[..., 0] * 256 + a[..., 1] + a[..., 2] / 256 - 32768
+    # bilineair samplen op het raster
+    PX = np.array([(_tile_xy(clat, lo, z)[0] - x_lo) * 256 for lo in lons])
+    PY = np.array([(_tile_xy(la, clon, z)[1] - y_lo) * 256 for la in lats])
+    PXg, PYg = np.meshgrid(PX, PY)     # PYg[j,i] hoort bij lat j
+    x0 = np.clip(np.floor(PXg).astype(int), 0, mosaic.shape[1] - 2)
+    y0 = np.clip(np.floor(PYg).astype(int), 0, mosaic.shape[0] - 2)
+    fx, fy = PXg - x0, PYg - y0
+    h = (mosaic[y0, x0] * (1 - fx) * (1 - fy) + mosaic[y0, x0 + 1] * fx * (1 - fy) +
+         mosaic[y0 + 1, x0] * (1 - fx) * fy + mosaic[y0 + 1, x0 + 1] * fx * fy)
+    return h
+
+
+def build_terrain(slug, clat, clon, half, ddir, layers):
+    step = TERRAIN_STEP
+    print(f"  terrein: DEM ophalen (half {half:.0f}m, stap {step:.0f}m)...", end="", flush=True)
+    h = fetch_dem_grid(clat, clon, half, step)
+    base = float(h.min())
+    rel = h - base
+    print(f" {h.shape[1]}x{h.shape[0]}, {base:.0f}-{h.max():.0f} m")
+
+    # kleurtextuur van de landbedekking (PIL), lineair -> sRGB voor de PNG
+    from PIL import Image, ImageDraw
+    px_m = 4.0
+    S = int(min(2400, 2 * half / px_m))
+    scale = S / (2 * half)
+
+    C = {"ground": (0.85, 0.83, 0.79), "green": (0.42, 0.55, 0.30),
+         "forest": (0.24, 0.40, 0.20), "rock": (0.68, 0.65, 0.61),
+         "sand": (0.86, 0.76, 0.52), "water": (0.08, 0.42, 0.48)}
+
+    def srgb(c):
+        return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
+
+    # Basiskleur per pixel uit hoogte + helling: laag = licht groen-crème, hoog/steil = rots.
+    gy, gx = np.gradient(h, step)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    h_c = float(h[h.shape[0] // 2, h.shape[1] // 2])
+    def to_tex(a):   # raster (rij j = y oplopend) -> textuurgrootte, rij 0 = noord
+        im_ = Image.fromarray(a.astype(np.float32), mode="F").resize((S, S), Image.BILINEAR)
+        return np.asarray(im_)[::-1]
+    rock_w = np.clip((to_tex(slope) - 26) / 14, 0, 1)
+    alt_w = np.clip((to_tex(h) - (h_c + 200)) / 500, 0, 1)
+    lin = lambda c: np.array(c, dtype=np.float32)
+    low = 0.55 * lin(C["ground"]) + 0.45 * lin(C["green"])      # weide-achtig laag
+    colr = low[None, None, :] * (1 - alt_w[..., None]) + lin(C["ground"])[None, None, :] * alt_w[..., None]
+    colr = colr * (1 - 0.8 * rock_w[..., None]) + lin(C["rock"])[None, None, :] * 0.8 * rock_w[..., None]
+    im = Image.fromarray(np.clip(255 * colr ** (1 / 2.2), 0, 255).astype(np.uint8), "RGB")
+    dr = ImageDraw.Draw(im)
+
+    def paint(rings, col):
+        for ring in rings:
+            pts = [((x + half) * scale, (half - y) * scale) for x, y in ring]
+            if len(pts) >= 3:
+                dr.polygon(pts, fill=srgb(C[col]))
+
+    # Landbedekking: 1 gecombineerde Overpass-call over het hele terrein (i.p.v. veel losse).
+    gdf = fetch(clat, clon, int(half), {
+        "landuse": ["forest", "grass", "meadow", "farmland", "recreation_ground"],
+        "natural": ["wood", "scrub", "grassland", "heath", "water", "sand", "beach"]})
+    groups = {"green": [], "forest": [], "sand": [], "water": []}
+    for _, row in gdf.iterrows():
+        nat, lu = str(row.get("natural")), str(row.get("landuse"))
+        if nat == "water": key = "water"
+        elif nat in ("sand", "beach"): key = "sand"
+        elif nat == "wood" or lu == "forest": key = "forest"
+        else: key = "green"
+        groups[key].append(row.geometry)
+    import geopandas as gpd
+    for key in ("green", "forest", "sand", "water"):          # volgorde = laagvolgorde
+        if groups[key]:
+            paint(collect_rings(gpd.GeoDataFrame(geometry=groups[key]), clat, clon), key)
+    # ook wat de scene al had (stadsgebied, betrouwbaar) eroverheen
+    for key in ("green", "sand", "forest", "water"):
+        paint([it["ring"] for it in layers.get(key, [])], key)
+    tex = f"cover_{slug}.png"
+    im.save(os.path.join(ddir, tex))
+    return {"half": half, "step": step, "n": int(h.shape[1]), "base": base,
+            "z": np.round(rel, 1).flatten().tolist(), "cover": tex}
+
+
+# ── Automatische zee uit de OSM-kustlijn (COASTAL=1) ─────────────────────
+# OSM-regel: natural=coastline is zo getekend dat LAND LINKS van de looprichting ligt.
+# Dus: zee = de deelvlakken van een groot vierkant die rechts van de lijn liggen.
+OVERPASS = ["https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter"]
+
+
+def fetch_coastline(clat, clon, half_m):
+    dlat = half_m / 111_320
+    dlon = half_m / (111_320 * math.cos(math.radians(clat)))
+    q = (f'[out:json][timeout:60];way["natural"="coastline"]'
+         f'({clat-dlat},{clon-dlon},{clat+dlat},{clon+dlon});out geom;')
+    for attempt in range(2):
+        url = OVERPASS[attempt % len(OVERPASS)]
+        try:
+            r = requests.post(url, data={"data": q}, timeout=45,
+                              headers={"User-Agent": "date-render/1.0"})
+            r.raise_for_status()
+            return [[(n["lat"], n["lon"]) for n in el["geometry"]]
+                    for el in r.json().get("elements", []) if el.get("geometry")]
+        except Exception as e:
+            print(f"    kustlijn poging {attempt+1} mislukt: {type(e).__name__}")
+    return _coastline_via_osm_api(clat, clon, half_m)
+
+
+def _coastline_via_osm_api(clat, clon, half_m, cell=0.012):
+    """Terugval als Overpass onbereikbaar is: de gewone OSM-API (max 50k nodes per call,
+    dus in kleine cellen). Geeft dezelfde vorm terug als fetch_coastline."""
+    dlat = half_m / 111_320
+    dlon = half_m / (111_320 * math.cos(math.radians(clat)))
+    ways = {}
+    la = clat - dlat
+    while la < clat + dlat:
+        lo = clon - dlon
+        while lo < clon + dlon:
+            box_ = f"{lo},{la},{min(lo+cell, clon+dlon)},{min(la+cell, clat+dlat)}"
+            try:
+                r = requests.get("https://api.openstreetmap.org/api/0.6/map.json",
+                                 params={"bbox": box_}, timeout=90,
+                                 headers={"User-Agent": "date-render/1.0"})
+                r.raise_for_status()
+                els = r.json()["elements"]
+                nodes = {e["id"]: (e["lat"], e["lon"]) for e in els if e["type"] == "node"}
+                for e in els:
+                    if e["type"] == "way" and e.get("tags", {}).get("natural") == "coastline":
+                        pts = [nodes[n] for n in e["nodes"] if n in nodes]
+                        if len(pts) >= 2:
+                            ways[e["id"]] = pts
+            except Exception as ex:
+                print(f"    OSM-API cel {box_} mislukt: {type(ex).__name__}")
+            lo += cell
+        la += cell
+    print(f"    kustlijn via OSM-API: {len(ways)} way(s)")
+    return list(ways.values()) or None
+
+
+def build_sea(clat, clon, half_m):
+    """Geeft lijst zee-ringen (lokale meters) of [] als er geen kustlijn in beeld is."""
+    from shapely.geometry import box
+    from shapely.ops import linemerge, unary_union, polygonize
+    ways = fetch_coastline(clat, clon, half_m)
+    if not ways:
+        print("  kustlijn: geen data -> geen zee")
+        return []
+    lines = [LineString([to_local_m(la, lo, clat, clon) for la, lo in w]) for w in ways]
+    merged = unary_union(lines)
+    if merged.geom_type != "LineString":      # meerdere stukken -> aaneenrijgen waar mogelijk
+        merged = linemerge(merged)
+    parts = [merged] if merged.geom_type == "LineString" else list(merged.geoms)
+    B = half_m
+    frame = box(-B, -B, B, B)
+    pieces = list(polygonize(unary_union([frame.boundary] + parts).simplify(0)))
+    sea = []
+    for pc in pieces:
+        pt = pc.representative_point()
+        # zee als het punt rechts van de dichtstbijzijnde kustlijn-segmentrichting ligt
+        best = min(parts, key=lambda l: l.distance(pt))
+        d = best.project(pt)
+        a = best.interpolate(max(d - 1.0, 0)); b = best.interpolate(min(d + 1.0, best.length))
+        cross = (b.x - a.x) * (pt.y - a.y) - (b.y - a.y) * (pt.x - a.x)
+        if cross < 0:                      # rechts van de lijn -> zee
+            sea.append(pc)
+    rings = [list(g.exterior.coords) for pc in sea
+             for g in (pc.geoms if pc.geom_type == "MultiPolygon" else [pc])]
+    print(f"  kustlijn: {len(parts)} lijn(en), {len(rings)} zee-vlak(ken)")
+    return rings
+
+
+def build_shore(sea_rings, width_m):
+    """Zandstrook: band van width_m langs de zee, aan de landkant (zee-buffer minus zee)."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    sea = unary_union([Polygon(r) for r in sea_rings if len(r) >= 4])
+    band = sea.buffer(width_m).difference(sea)
+    # De band is een ring MET gat (de zee); de renderer vult alleen enkelvoudige ringen.
+    # Daarom knippen we hem in tegels van 150 m zonder gaten.
+    from shapely.geometry import box
+    x0, y0, x1, y1 = band.bounds
+    out, step = [], 150.0
+    gx = x0
+    while gx < x1:
+        gy = y0
+        while gy < y1:
+            piece = band.intersection(box(gx, gy, gx + step, gy + step))
+            for g in ([piece] if piece.geom_type == "Polygon" else
+                      [q for q in getattr(piece, "geoms", []) if q.geom_type == "Polygon"]):
+                if g.area > 20 and not list(g.interiors):
+                    out.append(list(g.exterior.coords))
+            gy += step
+        gx += step
+    return out
+
+
 def export_city(slug, spots):
     # dedupe (zelfde coord dubbel in cords.txt)
     seen, uniq = set(), []
@@ -362,6 +604,15 @@ def export_city(slug, spots):
              "pier": pier, "path": path, "dates": dates, "anchors": anchor_xy}
     ddir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(ddir, exist_ok=True)
+    if os.environ.get("COASTAL", "0") == "1":
+        sea_rings = build_sea(clat, clon, radius * 2.5)
+        scene["sea"] = [{"ring": r} for r in sea_rings]
+        if sea_rings:
+            scene["shore"] = [{"ring": r} for r in build_shore(
+                sea_rings, float(os.environ.get("BEACH_W", 20)))]
+    if os.environ.get("TERRAIN", "0") == "1":
+        half_t = max(radius * 1.8, float(os.environ.get("TERRAIN_EXTENT", 4500)) * 1.4)
+        scene["terrain"] = build_terrain(slug, clat, clon, half_t, ddir, scene)
     out = os.path.join(ddir, f"scene_{slug}.json")
     with open(out, "w") as f:
         json.dump(scene, f)

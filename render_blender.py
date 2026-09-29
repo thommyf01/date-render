@@ -37,6 +37,8 @@ elif PRESET == "2":
 elif PRESET == "3":
     MARK, GREEN, TREES = "hearts", True, True   # alleen hartjes, geen building-outline
 
+TERRAIN    = os.environ.get("TERRAIN", "0") == "1"
+TEXAG      = float(os.environ.get("TEXAG", 2.2))   # verticale overdrijving bergen
 EXAG       = 3.2
 HMAX_M     = 80
 MSCALE     = 1.0          # marker-schaal; na extent-berekening aangepast
@@ -87,8 +89,8 @@ def add_cap(bm, ring, z, want_up):
             fc.normal_flip()
 
 
-def extrude_ring(bm, ring, h, emissive_mat_index=None):
-    """Bouw een gesloten geextrudeerd volume van een footprint."""
+def extrude_ring(bm, ring, h, emissive_mat_index=None, z0=0.0):
+    """Bouw een gesloten geextrudeerd volume van een footprint (bodem z0, top h)."""
     if ring and ring[0] == ring[-1]:
         ring = ring[:-1]
     if len(ring) < 3:
@@ -96,9 +98,9 @@ def extrude_ring(bm, ring, h, emissive_mat_index=None):
     bcx = sum(p[0] for p in ring) / len(ring)
     bcy = sum(p[1] for p in ring) / len(ring)
     add_cap(bm, ring, h, want_up=True)
-    add_cap(bm, ring, 0.0, want_up=False)
+    add_cap(bm, ring, z0, want_up=False)
     top = [bm.verts.new((x, y, h)) for x, y in ring]
-    bot = [bm.verts.new((x, y, 0.0)) for x, y in ring]
+    bot = [bm.verts.new((x, y, z0)) for x, y in ring]
     n = len(ring)
     for i in range(n):
         j = (i + 1) % n
@@ -156,6 +158,25 @@ print(f"[render] {len(buildings)} geb, {len(water)} water, {len(green)} groen, "
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
 
+# ── Hoogtenet (alleen TERRAIN=1 met terrain-data in de scene) ──
+terrain = data.get("terrain") if TERRAIN else None
+if terrain:
+    _tn, _th, _tstep = terrain["n"], terrain["half"], terrain["step"]
+    _tz = [v * TEXAG for v in terrain["z"]]
+
+
+def tz(x, y):
+    """Terreinhoogte (m, al overdreven) op lokale (x, y); 0 zonder terrein."""
+    if not terrain:
+        return 0.0
+    fx = min(max((x + _th) / _tstep, 0.0), _tn - 1.001)
+    fy = min(max((y + _th) / _tstep, 0.0), _tn - 1.001)
+    i, j = int(fx), int(fy)
+    ax, ay = fx - i, fy - j
+    z = _tz
+    return (z[j * _tn + i] * (1 - ax) * (1 - ay) + z[j * _tn + i + 1] * ax * (1 - ay) +
+            z[(j + 1) * _tn + i] * (1 - ax) * ay + z[(j + 1) * _tn + i + 1] * ax * ay)
+
 
 def make_material(name, rgb, rough=0.7, emit=0.0, emit_rgb=None):
     mat = bpy.data.materials.new(name)
@@ -212,10 +233,14 @@ for b in buildings:
         minx = min(minx, x); maxx = max(maxx, x)
         miny = min(miny, y); maxy = max(maxy, y)
     h = min(b["h"], HMAX_M) * EXAG
+    zb, zc = 0.0, 0.0
+    if terrain:      # bodem tot onder de laagste hoek (ingegraven), dak boven het gemiddelde
+        zs = [tz(x, y) for x, y in ring]
+        zb, zc = min(zs) - 4.0, sum(zs) / len(zs)
     if LANDMARKS and b.get("lm"):
-        extrude_ring(lbm, ring, h * 1.15)   # landmark: iets hoger
+        extrude_ring(lbm, ring, zc + h * 1.15, z0=zb)   # landmark: iets hoger
     else:
-        extrude_ring(bm, ring, h)
+        extrude_ring(bm, ring, zc + h, z0=zb)
 
 mesh = bpy.data.meshes.new("BuildingsMesh")
 bm.to_mesh(mesh); bm.free()
@@ -271,6 +296,8 @@ else:
     cy = (miny + maxy) / 2
     extent = max(maxx - minx, maxy - miny)
 # Markers groter op grotere kaarten (zichtbaar bij spread steden)
+if terrain:
+    extent = max(extent, float(os.environ.get("TERRAIN_EXTENT", 4500)))   # ruimer uitzoomen zodat de bergen in beeld komen
 MSCALE = min(3.2, max(1.0, extent / 1500))
 print(f"[render] extent {extent:.0f}m, centrum ({cx:.0f},{cy:.0f}), MSCALE {MSCALE:.2f}")
 
@@ -295,11 +322,49 @@ def build_flat(rings, z, mat, name):
 bpy.ops.mesh.primitive_plane_add(size=extent * 6, location=(cx, cy, -0.2))
 bpy.context.active_object.data.materials.append(mat_ground)
 
+# ── Bergterrein: hoogtenet met de landbedekking als kleurtextuur ──
+if terrain:
+    tbm_ = bmesh.new()
+    _vs = [tbm_.verts.new((-_th + i * _tstep, -_th + j * _tstep, _tz[j * _tn + i]))
+           for j in range(_tn) for i in range(_tn)]
+    for j in range(_tn - 1):
+        for i in range(_tn - 1):
+            tbm_.faces.new([_vs[j * _tn + i], _vs[j * _tn + i + 1],
+                            _vs[(j + 1) * _tn + i + 1], _vs[(j + 1) * _tn + i]])
+    uv = tbm_.loops.layers.uv.new("UVMap")
+    for f in tbm_.faces:
+        for l in f.loops:
+            l[uv].uv = ((l.vert.co.x + _th) / (2 * _th), (l.vert.co.y + _th) / (2 * _th))
+    tmesh_ = bpy.data.meshes.new("Terrain")
+    tbm_.to_mesh(tmesh_); tbm_.free()
+    for p_ in tmesh_.polygons:
+        p_.use_smooth = True
+    mat_terrain = bpy.data.materials.new("Terrain")
+    mat_terrain.use_nodes = True
+    _bsdf = mat_terrain.node_tree.nodes.get("Principled BSDF")
+    _img = bpy.data.images.load(os.path.join(os.path.dirname(scene_path), terrain["cover"]))
+    _tex = mat_terrain.node_tree.nodes.new("ShaderNodeTexImage")
+    _tex.image = _img
+    _tex.interpolation = "Linear"
+    mat_terrain.node_tree.links.new(_tex.outputs["Color"], _bsdf.inputs["Base Color"])
+    mat_terrain.node_tree.links.new(_tex.outputs["Color"], _bsdf.inputs["Emission Color"])
+    _bsdf.inputs["Roughness"].default_value = 0.9
+    _bsdf.inputs["Emission Strength"].default_value = 0.10
+    tmesh_.materials.append(mat_terrain)
+    tobj_ = bpy.data.objects.new("Terrain", tmesh_)
+    scene.collection.objects.link(tobj_)
+    print(f"[render] terrein {_tn}x{_tn}, reliëf {max(_tz):.0f} m (TEXAG {TEXAG})")
+
 # ── Zee (alleen kustlocaties): groot blauw half-vlak aan de zeekant van het strand.
 # Kustlijn-oriëntatie komt uit het zandstrook zélf (PCA op de zandpunten), niet uit
 # de centroid-vector gebouw→zand: die heuristiek week ~45° af bij een diagonale kust
 # (Scheveningen ligt NO-ZW) → de westkant links van het zand bleef grijs i.p.v. blauw.
-if _coastal and sand and buildings:
+if _coastal and data.get("sea") and not terrain:
+    # Automatische zee uit de OSM-kustlijn (export_osm.build_sea)
+    build_flat([z["ring"] for z in data["sea"]], 0.05, mat_sea, "Sea")
+    if data.get("shore"):    # automatische zandstrook langs de kustlijn
+        build_flat([z["ring"] for z in data["shore"]], 0.13, mat_sand, "Shore")
+elif _coastal and sand and buildings and not terrain:
     spts = [p for s in sand for p in s["ring"]]
     n = len(spts)
     mx = sum(p[0] for p in spts) / n
@@ -336,11 +401,11 @@ if _coastal and sand and buildings:
     build_flat([quad], 0.05, mat_sea, "Sea")
 
 # ── Zand (strand/duin) — boven de zee ──
-if sand:
+if sand and not terrain:
     build_flat([s["ring"] for s in sand], 0.12, mat_sand, "Sand")
 
 # ── Groen ──
-if GREEN:
+if GREEN and not terrain:
     build_flat([g["ring"] for g in green], 0.08, mat_green, "Green")
     if FOREST:
         build_flat([f["ring"] for f in forest], 0.085, mat_forest, "Forest")
@@ -356,7 +421,8 @@ if os.environ.get("PIER", "0") == "1":
     build_flat([p["ring"] for p in pier], WATER_Z + 0.4, mat_bridge, "Pier")
 
 # ── Water ──
-build_flat([w["ring"] for w in water], WATER_Z, mat_water, "Water")
+if not terrain:
+    build_flat([w["ring"] for w in water], WATER_Z, mat_water, "Water")
 
 # ── Bruggen (boven het water) — alleen schone, grote bruggen (Maas-oversteken).
 # De OSM-bufferlaag bevat corrupte ringen met verdwaalde coords (→ reuzepolygoon
@@ -380,9 +446,10 @@ if os.environ.get("BRIDGE", "0") == "1" and bridge:
 if TREES and trees:
     tbm = bmesh.new()
     for tx, ty in trees:
-        apex = tbm.verts.new((tx, ty, 11.0))
+        zt = tz(tx, ty)
+        apex = tbm.verts.new((tx, ty, zt + 11.0))
         ring = [tbm.verts.new((tx + 3.2 * math.cos(2*math.pi*k/6),
-                               ty + 3.2 * math.sin(2*math.pi*k/6), 0.3))
+                               ty + 3.2 * math.sin(2*math.pi*k/6), zt + 0.3))
                 for k in range(6)]
         for k in range(6):
             try:
@@ -402,8 +469,10 @@ if TREES and trees:
 def building_height_at(px, py):
     for b in buildings:
         if point_in_ring(px, py, b["ring"]):
-            return min(b["h"], HMAX_M) * EXAG, b["ring"]
-    return 0.0, None
+            r_ = b["ring"]
+            zc_ = (sum(tz(x, y) for x, y in r_) / len(r_)) if terrain else 0.0
+            return zc_ + min(b["h"], HMAX_M) * EXAG, b["ring"]
+    return tz(px, py), None
 
 
 # ── Datum-markers ──
@@ -690,6 +759,9 @@ else:
     sun_data.energy = 2.0
     sun_data.angle = math.radians(2.5)
     sun.rotation_euler = (math.radians(50), math.radians(15), math.radians(-55))
+if terrain:   # lage zon zodat hellingen schaduw krijgen
+    sun_data.energy = 3.2
+    sun.rotation_euler = (math.radians(float(os.environ.get("SUN_EL", 62))), 0, math.radians(-65))
 scene.collection.objects.link(sun)
 
 world = bpy.data.worlds.new("World")
@@ -710,8 +782,10 @@ cam_data.ortho_scale = extent * 1.04   # strak frame: gebouwen vullen de poster
 cam_data.clip_start = 1.0
 cam_data.clip_end = extent * 8
 cam = bpy.data.objects.new("Cam", cam_data)
-eye = Vector((cx, cy - extent * 0.55, extent * 1.0))
-direction = (Vector((cx, cy, 0.0)) - eye).normalized()
+_zc = tz(cx, cy)
+_cam_y, _cam_z = (extent * float(os.environ.get("CAM_Y", 1.1)), extent * float(os.environ.get("CAM_Z", 0.9))) if terrain else (extent * 0.55, extent * 1.0)
+eye = Vector((cx, cy - _cam_y, _zc + _cam_z))
+direction = (Vector((cx, cy, _zc)) - eye).normalized()
 cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 cam.location = eye
 scene.collection.objects.link(cam)
