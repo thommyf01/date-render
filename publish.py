@@ -36,6 +36,7 @@ def main():
 
     entry = {
         "id": meta["id"], "city": meta["city"],
+        "country": meta.get("country"),
         "src": meta["src"], "thumb": meta["thumb"],
         "width": meta["width"], "height": meta["height"],
     }

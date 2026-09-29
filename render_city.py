@@ -112,6 +112,7 @@ def main():
 
     meta = {
         "id": slug, "city": city,
+        "country": data.get("country"),
         "src": f"assets/renders/{slug}-large.webp",
         "thumb": f"assets/renders/{slug}-thumb.webp",
         "width": w, "height": h,
