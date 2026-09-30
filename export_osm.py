@@ -276,6 +276,22 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
     def srgb(c):
         return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
 
+    # Brede OSM-landbedekking (1 Overpass-call over het hele terrein). Aanwezig = leidend voor
+    # bos/gras; ontbreekt (offline/leeg) = terugval op een DEM-benadering (boomgrens + ruis).
+    gdf = fetch(clat, clon, int(half), {
+        "landuse": ["forest", "grass", "meadow", "farmland"],
+        "natural": ["wood", "scrub", "grassland", "heath"]})
+    osm_forest, osm_green = [], []
+    for _, row in gdf.iterrows():
+        g = row.geometry
+        if g is None or g.is_empty:
+            continue
+        is_forest = str(row.get("natural")) == "wood" or str(row.get("landuse")) == "forest"
+        (osm_forest if is_forest else osm_green).append(g)
+    have_osm = len(osm_forest) > 0
+    print(f"  OSM-landbedekking: {len(osm_forest)} bos, {len(osm_green)} gras -> "
+          f"{'OSM' if have_osm else 'DEM-terugval'}")
+
     # Basiskleur per pixel uit DEM (werkt zonder OSM-landuse): bos onder de boomgrens en op
     # niet-te-steile grond, weide/alpine erboven, rots op steile hellingen. Bospatronen krijgen
     # laagfrequente ruis zodat het geen egaal vlak wordt; OSM-polygonen komen er later overheen.
@@ -294,6 +310,8 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
     noise = (noise - noise.min()) / (np.ptp(noise) + 1e-6)
     patch = np.clip((noise - 0.30) / 0.25, 0, 1)
     forest_w = np.clip((treeline - hh) / 150, 0, 1) * np.clip((40 - sl) / 8, 0, 1) * (0.35 + 0.65 * patch)
+    if have_osm:
+        forest_w = forest_w * 0
     alpine_w = np.clip((hh - (treeline - 150)) / 350, 0, 1)
     rock_w = np.clip((sl - 28) / 14, 0, 1)
     lin = lambda c: np.array(c, dtype=np.float32)
@@ -310,14 +328,55 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
             if len(pts) >= 3:
                 dr.polygon(pts, fill=srgb(C[col]))
 
-    # OSM levert alleen water en zand (scherp afgebakend, al opgehaald voor de stad). Bos/gras
-    # komt uit de hoogtedata: OSM-landuse stopt bij de fetch-straal en geeft een harde rand.
+    import geopandas as gpd
+    fmask = Image.new("L", (S, S), 0)
+    fdr = ImageDraw.Draw(fmask)
+    if have_osm:
+        if osm_green:
+            paint(collect_rings(gpd.GeoDataFrame(geometry=osm_green), clat, clon), "green")
+        frings = collect_rings(gpd.GeoDataFrame(geometry=osm_forest), clat, clon)
+        paint(frings, "forest")
+        for ring in frings:
+            pts = [((x + half) * scale, (half - y) * scale) for x, y in ring]
+            if len(pts) >= 3:
+                fdr.polygon(pts, fill=255)
+        fm = np.asarray(fmask) > 0
+    else:
+        fm = forest_w > 0.6
+    # geen bomen op/tegen gebouwen: footprints (+~24 m rand) uit het bosmasker halen
+    em = Image.fromarray((fm * 255).astype(np.uint8), "L")
+    edr = ImageDraw.Draw(em)
+    for b in layers.get("buildings", []):
+        pts = [((x + half) * scale, (half - y) * scale) for x, y in b["ring"]]
+        if len(pts) >= 3:
+            edr.polygon(pts, fill=0, outline=0, width=7)
+    for key in ("water", "sand"):          # ook geen bomen in meren of op strand
+        for it in layers.get(key, []):
+            pts = [((x + half) * scale, (half - y) * scale) for x, y in it["ring"]]
+            if len(pts) >= 3:
+                edr.polygon(pts, fill=0)
+    fm = np.asarray(em) > 0
+    # water en zand (scherp afgebakend, al opgehaald voor de stad) bovenop
     for key in ("sand", "water"):
         paint([it["ring"] for it in layers.get(key, [])], key)
+
+    # Bomen: jitter-raster (TREE_SP m) binnen het bosmasker, niet op steile grond.
+    sp = float(os.environ.get("TREE_SP", 55))
+    rng = np.random.default_rng(seed)
+    lim = min(half, float(os.environ.get("TERRAIN_EXTENT", 4500)) * 0.75)   # alleen in beeld
+    trees = []
+    xs_ = np.arange(-lim, lim, sp)
+    for x0 in xs_:
+        for y0 in xs_:
+            x, y = x0 + rng.uniform(0, sp), y0 + rng.uniform(0, sp)
+            px_, py_ = int((x + half) * scale), int((half - y) * scale)
+            if 0 <= px_ < S and 0 <= py_ < S and fm[py_, px_] and sl[py_, px_] < 35:
+                trees.append([round(float(x), 1), round(float(y), 1)])
+    print(f"  bomen in bos: {len(trees)}")
     tex = f"cover_{slug}.png"
     im.save(os.path.join(ddir, tex))
     return {"half": half, "step": step, "n": int(h.shape[1]), "base": base,
-            "z": np.round(rel, 1).flatten().tolist(), "cover": tex}
+            "z": np.round(rel, 1).flatten().tolist(), "cover": tex, "trees": trees}
 
 
 # ── Automatische zee uit de OSM-kustlijn (COASTAL=1) ─────────────────────

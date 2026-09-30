@@ -384,13 +384,16 @@ if BRIDGE and bridge:
         build_flat(good, WATER_Z + 1.5, mat_bridge, "Bridge")
 
 # ── bomen (low-poly cones in één mesh) ──
-if TREES and trees:
+_tt = (terrain.get("trees") or []) if terrain else []
+if TREES and (trees or _tt):
+    trees = list(trees) + _tt
+    _ts = max(1.0, MSCALE) if terrain else 1.0   # bomen schalen mee met de uitsnede
     tbm = bmesh.new()
     for tx, ty in trees:
         zt = tz(tx, ty)
-        apex = tbm.verts.new((tx, ty, zt + 11.0))
-        ring = [tbm.verts.new((tx + 3.2*math.cos(2*math.pi*k/6),
-                               ty + 3.2*math.sin(2*math.pi*k/6), zt + 0.3)) for k in range(6)]
+        apex = tbm.verts.new((tx, ty, zt + 11.0 * _ts))
+        ring = [tbm.verts.new((tx + 3.2*_ts*math.cos(2*math.pi*k/6),
+                               ty + 3.2*_ts*math.sin(2*math.pi*k/6), zt + 0.3)) for k in range(6)]
         for k in range(6):
             try: tbm.faces.new([apex, ring[k], ring[(k+1) % 6]])
             except ValueError: pass
