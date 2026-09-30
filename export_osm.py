@@ -255,6 +255,56 @@ def fetch_dem_grid(clat, clon, half, step):
     return h
 
 
+# ESA WorldCover 10 m (2021, v200): gratis, wereldwijd, cloud-optimized GeoTIFF per 3x3 graden.
+# Klassen: 10 bomen, 20 struik, 30 gras, 40 akker, 50 bebouwd, 60 kaal, 70 sneeuw, 80 water,
+# 90 wetland, 95 mangrove, 100 mos. Alleen het benodigde venster wordt gelezen (range-requests).
+WC_URL = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_{t}_Map.tif"
+
+
+def _wc_tile(lat, lon):
+    la, lo = int(math.floor(lat / 3)) * 3, int(math.floor(lon / 3)) * 3
+    return f"{'N' if la >= 0 else 'S'}{abs(la):02d}{'E' if lo >= 0 else 'W'}{abs(lo):03d}"
+
+
+def fetch_worldcover(clat, clon, half, S):
+    """S x S klassenraster (uint8, rij 0 = noord) over dezelfde lokale-meter-uitsnede als de
+    textuur, of None als er niets is (bv. alleen zee) of rasterio ontbreekt."""
+    try:
+        import rasterio
+        from rasterio.merge import merge
+        from rasterio.enums import Resampling
+    except ImportError:
+        print("  WorldCover: rasterio ontbreekt -> overgeslagen")
+        return None
+    dlat = half / 111_320
+    dlon = half / (111_320 * math.cos(math.radians(clat)))
+    w, e, s_, n = clon - dlon, clon + dlon, clat - dlat, clat + dlat
+    names = sorted({_wc_tile(la, lo) for la in (s_, n) for lo in (w, e)})
+    dss = []
+    try:
+        for t in names:
+            try:
+                dss.append(rasterio.open(WC_URL.format(t=t)))
+            except Exception:
+                pass                      # tegel bestaat niet (open zee)
+        if not dss:
+            return None
+        arr, _ = merge(dss, bounds=(w, s_, e, n), res=((e - w) / S, (n - s_) / S),
+                       nodata=0, resampling=Resampling.nearest)
+    finally:
+        for d in dss:
+            d.close()
+    a = arr[0]
+    if a.shape != (S, S):
+        from PIL import Image
+        a = np.asarray(Image.fromarray(a).resize((S, S), Image.NEAREST))
+    a = a.astype(np.uint8)
+    # lichte afronding van de 10 m-blokjes: majority-filter op de klassen (categorisch, dus geen blur)
+    from PIL import Image, ImageFilter
+    a = np.asarray(Image.fromarray(a).filter(ImageFilter.ModeFilter(int(os.environ.get("WC_SMOOTH", 7)))))
+    return a
+
+
 def terrain_extent(natural_extent):
     """Uitsnede (m) voor een bergkaart: env TERRAIN_EXTENT, anders 1.6x de natuurlijke
     stadsuitsnede (min 1800, max 4500) zodat een kleine stad niet een enorm landschap krijgt."""
@@ -288,10 +338,22 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
     def srgb(c):
         return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
 
+    # Landbedekking: LANDCOVER=worldcover (echte 10 m-kaart) of osm (standaard, brede Overpass-call).
+    lc = os.environ.get("LANDCOVER", "both")         # osm | worldcover | both (standaard)
+    use_wc = lc in ("worldcover", "both")
+    wc = fetch_worldcover(clat, clon, half, S) if use_wc else None
+    if wc is None:
+        use_wc = False
+    else:
+        u, cnt = np.unique(wc, return_counts=True)
+        print("  WorldCover-klassen:", {int(k): f"{100 * c / wc.size:.0f}%" for k, c in zip(u, cnt)})
+    use_osm = lc != "worldcover" or not use_wc       # 'both' = WorldCover basis + OSM-vlakken erover
+    import geopandas as gpd
+    gdf = gpd.GeoDataFrame()
     # Brede OSM-landbedekking (1 Overpass-call over het hele terrein). Aanwezig = leidend voor
     # bos/gras; ontbreekt (offline/leeg) = terugval op een DEM-benadering (boomgrens + ruis).
     import time as _time
-    for _try in range(3):    # fetch() slikt fouten en geeft dan leeg terug -> opnieuw proberen
+    for _try in range(3 if use_osm else 0):    # fetch() slikt fouten en geeft dan leeg terug -> opnieuw proberen
         gdf = fetch(clat, clon, int(half), {
             "landuse": ["forest", "grass", "meadow", "farmland"],
             "natural": ["wood", "scrub", "grassland", "heath"]})
@@ -336,6 +398,19 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
     colr = meadow[None, None, :] * (1 - alpine_w[..., None]) + lin(C["ground"])[None, None, :] * alpine_w[..., None]
     colr = colr * (1 - forest_w[..., None]) + lin(C["forest"])[None, None, :] * forest_w[..., None]
     colr = colr * (1 - 0.8 * rock_w[..., None]) + lin(C["rock"])[None, None, :] * 0.8 * rock_w[..., None]
+    if use_wc:       # echte landbedekking: klasse -> kleur (lineair), DEM-kleur vervalt
+        lut = np.tile(lin(C["ground"]), (256, 1))
+        lut[10] = lin(C["forest"]); lut[95] = lin(C["forest"])
+        lut[20] = 0.5 * lin(C["forest"]) + 0.5 * lin(C["green"])
+        lut[30] = 0.5 * lin(C["ground"]) + 0.5 * lin(C["green"])
+        lut[40] = 0.7 * lin(C["ground"]) + 0.3 * lin(C["green"])
+        lut[50] = lin(C["ground"])
+        lut[60] = lin(C["rock"])
+        lut[70] = lin((0.95, 0.95, 0.96))
+        lut[80] = lin(C["water"])
+        lut[90] = lin((0.35, 0.50, 0.40))
+        lut[100] = lin((0.60, 0.66, 0.55))
+        colr = lut[wc]
     im = Image.fromarray(np.clip(255 * colr ** (1 / 2.2), 0, 255).astype(np.uint8), "RGB")
     dr = ImageDraw.Draw(im)
 
@@ -345,12 +420,21 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
             if len(pts) >= 3:
                 dr.polygon(pts, fill=srgb(C[col]))
 
-    import geopandas as gpd
     fmask = Image.new("L", (S, S), 0)
     fdr = ImageDraw.Draw(fmask)
-    if have_osm:
+    if use_wc and not use_osm:
+        fm = wc == 10          # bomen alleen waar WorldCover boomdek ziet
+    elif have_osm:
+        if use_wc:             # samengevoegd: WorldCover-bos als basis, OSM-vlakken bepalen daarbinnen
+            fmask = Image.fromarray(((wc == 10) * 255).astype(np.uint8), "L")
+            fdr = ImageDraw.Draw(fmask)
         if osm_green:
-            paint(collect_rings(gpd.GeoDataFrame(geometry=osm_green), clat, clon), "green")
+            grings = collect_rings(gpd.GeoDataFrame(geometry=osm_green), clat, clon)
+            paint(grings, "green")
+            for ring in grings:          # OSM zegt gras -> daar geen bomen
+                pts = [((x + half) * scale, (half - y) * scale) for x, y in ring]
+                if len(pts) >= 3:
+                    fdr.polygon(pts, fill=0)
         frings = collect_rings(gpd.GeoDataFrame(geometry=osm_forest), clat, clon)
         paint(frings, "forest")
         for ring in frings:
@@ -358,6 +442,8 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
             if len(pts) >= 3:
                 fdr.polygon(pts, fill=255)
         fm = np.asarray(fmask) > 0
+    elif use_wc:
+        fm = wc == 10
     else:
         print("  WAARSCHUWING: geen OSM-landbedekking -> geen bos/bomen (liever leeg dan verzonnen)")
         fm = np.zeros((S, S), dtype=bool)

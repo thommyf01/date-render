@@ -7,3 +7,5 @@ requests
 geopandas
 scipy
 pillow
+rasterio>=1.4
+affine<3
