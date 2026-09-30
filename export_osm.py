@@ -290,9 +290,15 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
 
     # Brede OSM-landbedekking (1 Overpass-call over het hele terrein). Aanwezig = leidend voor
     # bos/gras; ontbreekt (offline/leeg) = terugval op een DEM-benadering (boomgrens + ruis).
-    gdf = fetch(clat, clon, int(half), {
-        "landuse": ["forest", "grass", "meadow", "farmland"],
-        "natural": ["wood", "scrub", "grassland", "heath"]})
+    import time as _time
+    for _try in range(3):    # fetch() slikt fouten en geeft dan leeg terug -> opnieuw proberen
+        gdf = fetch(clat, clon, int(half), {
+            "landuse": ["forest", "grass", "meadow", "farmland"],
+            "natural": ["wood", "scrub", "grassland", "heath"]})
+        if len(gdf):
+            break
+        print(f"    landbedekking leeg (poging {_try + 1}/3)")
+        _time.sleep(8)
     osm_forest, osm_green = [], []
     for _, row in gdf.iterrows():
         g = row.geometry
@@ -322,8 +328,7 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
     noise = (noise - noise.min()) / (np.ptp(noise) + 1e-6)
     patch = np.clip((noise - 0.30) / 0.25, 0, 1)
     forest_w = np.clip((treeline - hh) / 150, 0, 1) * np.clip((40 - sl) / 8, 0, 1) * (0.35 + 0.65 * patch)
-    if have_osm:
-        forest_w = forest_w * 0
+    forest_w = forest_w * 0      # nooit verzonnen bos: zonder OSM-data blijft het terrein neutraal
     alpine_w = np.clip((hh - (treeline - 150)) / 350, 0, 1)
     rock_w = np.clip((sl - 28) / 14, 0, 1)
     lin = lambda c: np.array(c, dtype=np.float32)
@@ -354,7 +359,8 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
                 fdr.polygon(pts, fill=255)
         fm = np.asarray(fmask) > 0
     else:
-        fm = forest_w > 0.6
+        print("  WAARSCHUWING: geen OSM-landbedekking -> geen bos/bomen (liever leeg dan verzonnen)")
+        fm = np.zeros((S, S), dtype=bool)
     # geen bomen op/tegen gebouwen: footprints (+~24 m rand) uit het bosmasker halen
     em = Image.fromarray((fm * 255).astype(np.uint8), "L")
     edr = ImageDraw.Draw(em)
@@ -362,12 +368,12 @@ def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
         pts = [((x + half) * scale, (half - y) * scale) for x, y in b["ring"]]
         if len(pts) >= 3:
             edr.polygon(pts, fill=0, outline=0, width=7)
-    for key in ("water", "sand"):          # ook geen bomen in meren of op strand
+    for key in ("water", "sand", "sea", "shore"):   # geen bomen in meren, zee of op strand
         for it in layers.get(key, []):
             pts = [((x + half) * scale, (half - y) * scale) for x, y in it["ring"]]
             if len(pts) >= 3:
                 edr.polygon(pts, fill=0)
-    fm = np.asarray(em) > 0
+    fm = (np.asarray(em) > 0) & (hh > 1.0)     # en niet op zeeniveau
     # Wegen en paden (1 Overpass-call), als lijnen in de textuur; breedte in meters naar pixels.
     if os.environ.get("ROADS", "0") == "1":
         W = {"motorway": 10, "trunk": 10, "primary": 9, "secondary": 8, "tertiary": 7,
