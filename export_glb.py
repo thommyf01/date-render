@@ -241,6 +241,7 @@ _cm = max(150.0, 0.12 * max(maxx - minx, maxy - miny))
 CROP = (minx - _cm, miny - _cm, maxx + _cm, maxy + _cm)
 if terrain:   # bergen: uitsnede ruim rond het frame-centrum (binnen het hoogtenet)
     _hc = min(float(os.environ.get("TERRAIN_EXTENT") or min(4500.0, max(1800.0, 1.6 * extent))) * 0.75, _th - 2 * _tstep)
+    _hc = min(_hc, data.get("bld_r", _hc))   # niet verder dan waar gebouwen zijn opgehaald
     CROP = (min(CROP[0], max(cx - _hc, -_th + _tstep)), min(CROP[1], max(cy - _hc, -_th + _tstep)),
             max(CROP[2], min(cx + _hc, _th - _tstep)), max(CROP[3], min(cy + _hc, _th - _tstep)))
 

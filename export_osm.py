@@ -642,11 +642,16 @@ def export_city(slug, spots):
     spread = max((math.hypot(*to_local_m(la, lo, clat, clon))
                   for la, lo in pts), default=0)
     radius = int(min(MAX_R, max(MIN_R, spread + MARGIN_M)))
+    # Bergkaart: het zichtgebied is groter dan de stad -> gebouwen over het hele zichtgebied
+    # ophalen (anders vullen ze maar een vierkant midden in het landschap).
+    terrain_on = os.environ.get("TERRAIN", "0") == "1"
+    t_ext = terrain_extent(radius * 1.7) if terrain_on else None
+    bld_r = int(min(max(radius, t_ext * 0.75), 3500)) if terrain_on else radius
     print(f"\n[{slug}] {len(spots)} plekken, centrum {clat:.4f},{clon:.4f}, "
           f"straal {radius}m")
 
     print("  gebouwen...", end="", flush=True)
-    bgdf = fetch(clat, clon, radius, {"building": True})
+    bgdf = fetch(clat, clon, bld_r, {"building": True})
     buildings = []
     for _, row in bgdf.iterrows():
         geom = row.geometry
@@ -682,7 +687,7 @@ def export_city(slug, spots):
     # dichtstbijzijnde BAG-pand-centroïde (≤12 m) en neem die hoogte over.
     if BAG and slug != "balice" and buildings:
         print("  3D BAG hoogtes...", end="", flush=True)
-        cents, heights = fetch_bag_heights(clat, clon, radius)
+        cents, heights = fetch_bag_heights(clat, clon, bld_r)
         if heights is not None and len(heights):
             from scipy.spatial import cKDTree
             tree = cKDTree(cents)
@@ -790,7 +795,8 @@ def export_city(slug, spots):
              "buildings": buildings, "water": water, "green": green,
              "trees": trees, "sand": sand, "forest": forest, "pitch": pitch,
              "rail": [{"ring": r} for r in rail], "bridge": bridge,
-             "pier": pier, "path": path, "dates": dates, "anchors": anchor_xy}
+             "pier": pier, "path": path, "dates": dates, "anchors": anchor_xy,
+             "bld_r": bld_r}
     ddir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(ddir, exist_ok=True)
     # Wegen/paden voor gewone (niet-terrein) kaarten: gebufferde lijnen als vlakke ringen.
@@ -814,8 +820,6 @@ def export_city(slug, spots):
                     dest.append({"ring": ring})
         scene["roads"], scene["trails"] = roads, trails
         print(f"  wegen: {len(roads)} + paden: {len(trails)}")
-    terrain_on = os.environ.get("TERRAIN", "0") == "1"
-    t_ext = terrain_extent(radius * 1.7) if terrain_on else None
     half_t = max(radius * 1.8, t_ext * 1.4) if terrain_on else None
     if os.environ.get("COASTAL", "0") == "1":
         # bij terrein moet de zee het hele hoogtenet dekken
