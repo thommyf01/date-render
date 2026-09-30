@@ -255,10 +255,21 @@ def fetch_dem_grid(clat, clon, half, step):
     return h
 
 
-def build_terrain(slug, clat, clon, half, ddir, layers):
+def terrain_extent(natural_extent):
+    """Uitsnede (m) voor een bergkaart: env TERRAIN_EXTENT, anders 1.6x de natuurlijke
+    stadsuitsnede (min 1800, max 4500) zodat een kleine stad niet een enorm landschap krijgt."""
+    v = os.environ.get("TERRAIN_EXTENT")
+    if v:
+        return float(v)
+    return min(4500.0, max(1800.0, 1.6 * natural_extent))
+
+
+def build_terrain(slug, clat, clon, half, ddir, layers, ext=None):
     step = TERRAIN_STEP
     print(f"  terrein: DEM ophalen (half {half:.0f}m, stap {step:.0f}m)...", end="", flush=True)
     h = fetch_dem_grid(clat, clon, half, step)
+    if layers.get("sea"):          # kust: zee op 0 m (Terrarium geeft zeebodem-dieptes)
+        h = np.maximum(h, 0.0)
     base = float(h.min())
     rel = h - base
     print(f" {h.shape[1]}x{h.shape[0]}, {base:.0f}-{h.max():.0f} m")
@@ -272,7 +283,7 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
     C = {"ground": (0.85, 0.83, 0.79), "green": (0.42, 0.55, 0.30),
          "forest": (0.24, 0.40, 0.20), "rock": (0.68, 0.65, 0.61),
          "sand": (0.86, 0.76, 0.52), "water": (0.08, 0.42, 0.48),
-         "road": (0.86, 0.85, 0.82), "path": (0.72, 0.66, 0.55)}
+         "road": (0.86, 0.85, 0.82), "path": (0.72, 0.66, 0.55), "sea": (0.10, 0.34, 0.55)}
 
     def srgb(c):
         return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
@@ -383,6 +394,9 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
                     dr.line(pts, fill=srgb(C[col]), width=wpx, joint="curve")
                     nroad += 1
         print(f"  wegen/paden: {nroad} lijnen")
+    # Kust: automatische zee + zandband (uit de OSM-kustlijn) in de textuur
+    paint([it["ring"] for it in layers.get("shore", [])], "sand")
+    paint([it["ring"] for it in layers.get("sea", [])], "sea")
     # water en zand (scherp afgebakend, al opgehaald voor de stad) bovenop
     for key in ("sand", "water"):
         paint([it["ring"] for it in layers.get(key, [])], key)
@@ -390,7 +404,7 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
     # Bomen: jitter-raster (TREE_SP m) binnen het bosmasker, niet op steile grond.
     sp = float(os.environ.get("TREE_SP", 55))
     rng = np.random.default_rng(seed)
-    lim = min(half, float(os.environ.get("TERRAIN_EXTENT", 4500)) * 0.75)   # alleen in beeld
+    lim = min(half, (ext or float(os.environ.get("TERRAIN_EXTENT", 4500))) * 0.75)   # alleen in beeld
     trees = []
     xs_ = np.arange(-lim, lim, sp)
     for x0 in xs_:
@@ -708,15 +722,18 @@ def export_city(slug, spots):
                     dest.append({"ring": ring})
         scene["roads"], scene["trails"] = roads, trails
         print(f"  wegen: {len(roads)} + paden: {len(trails)}")
+    terrain_on = os.environ.get("TERRAIN", "0") == "1"
+    t_ext = terrain_extent(radius * 1.7) if terrain_on else None
+    half_t = max(radius * 1.8, t_ext * 1.4) if terrain_on else None
     if os.environ.get("COASTAL", "0") == "1":
-        sea_rings = build_sea(clat, clon, radius * 2.5)
+        # bij terrein moet de zee het hele hoogtenet dekken
+        sea_rings = build_sea(clat, clon, max(radius * 2.5, (half_t or 0) * 1.05))
         scene["sea"] = [{"ring": r} for r in sea_rings]
         if sea_rings:
             scene["shore"] = [{"ring": r} for r in build_shore(
                 sea_rings, float(os.environ.get("BEACH_W", 20)))]
-    if os.environ.get("TERRAIN", "0") == "1":
-        half_t = max(radius * 1.8, float(os.environ.get("TERRAIN_EXTENT", 4500)) * 1.4)
-        scene["terrain"] = build_terrain(slug, clat, clon, half_t, ddir, scene)
+    if terrain_on:
+        scene["terrain"] = build_terrain(slug, clat, clon, half_t, ddir, scene, t_ext)
     out = os.path.join(ddir, f"scene_{slug}.json")
     with open(out, "w") as f:
         json.dump(scene, f)

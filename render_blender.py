@@ -299,7 +299,8 @@ else:
     extent = max(maxx - minx, maxy - miny)
 # Markers groter op grotere kaarten (zichtbaar bij spread steden)
 if terrain:
-    extent = max(extent, float(os.environ.get("TERRAIN_EXTENT", 4500)))   # ruimer uitzoomen zodat de bergen in beeld komen
+    # ruimer uitzoomen zodat de bergen in beeld komen: 1.6x de stadsuitsnede (1800-4500 m)
+    extent = max(extent, float(os.environ.get("TERRAIN_EXTENT") or min(4500.0, max(1800.0, 1.6 * extent))))
 MSCALE = min(3.2, max(1.0, extent / 1500))
 print(f"[render] extent {extent:.0f}m, centrum ({cx:.0f},{cy:.0f}), MSCALE {MSCALE:.2f}")
 
