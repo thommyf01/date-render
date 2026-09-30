@@ -265,13 +265,14 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
 
     # kleurtextuur van de landbedekking (PIL), lineair -> sRGB voor de PNG
     from PIL import Image, ImageDraw
-    px_m = 4.0
-    S = int(min(2400, 2 * half / px_m))
+    px_m = 2.0
+    S = int(min(4096, 2 * half / px_m))
     scale = S / (2 * half)
 
     C = {"ground": (0.85, 0.83, 0.79), "green": (0.42, 0.55, 0.30),
          "forest": (0.24, 0.40, 0.20), "rock": (0.68, 0.65, 0.61),
-         "sand": (0.86, 0.76, 0.52), "water": (0.08, 0.42, 0.48)}
+         "sand": (0.86, 0.76, 0.52), "water": (0.08, 0.42, 0.48),
+         "road": (0.86, 0.85, 0.82), "path": (0.72, 0.66, 0.55)}
 
     def srgb(c):
         return tuple(int(round(255 * (v ** (1 / 2.2)))) for v in c)
@@ -356,6 +357,32 @@ def build_terrain(slug, clat, clon, half, ddir, layers):
             if len(pts) >= 3:
                 edr.polygon(pts, fill=0)
     fm = np.asarray(em) > 0
+    # Wegen en paden (1 Overpass-call), als lijnen in de textuur; breedte in meters naar pixels.
+    if os.environ.get("ROADS", "0") == "1":
+        W = {"motorway": 10, "trunk": 10, "primary": 9, "secondary": 8, "tertiary": 7,
+             "unclassified": 6, "residential": 6, "living_street": 5, "service": 3.5,
+             "track": 3.5, "pedestrian": 4, "footway": 2, "path": 2, "cycleway": 2.5,
+             "steps": 2, "bridleway": 2}
+        rg = fetch(clat, clon, int(half), {"highway": list(W)})
+        nroad = 0
+        for _, row in rg.iterrows():
+            g = row.geometry
+            if g is None or g.is_empty:
+                continue
+            hw = str(row.get("highway"))
+            if hw not in W:
+                continue
+            lines = ([g] if g.geom_type == "LineString"
+                     else list(g.geoms) if g.geom_type == "MultiLineString" else [])
+            col = "path" if hw in ("footway", "path", "cycleway", "steps", "bridleway", "track") else "road"
+            wpx = max(1, int(round(W[hw] * scale)))
+            for ln in lines:
+                pts = [((to_local_m(la, lo, clat, clon)[0] + half) * scale,
+                        (half - to_local_m(la, lo, clat, clon)[1]) * scale) for lo, la in ln.coords]
+                if len(pts) >= 2:
+                    dr.line(pts, fill=srgb(C[col]), width=wpx, joint="curve")
+                    nroad += 1
+        print(f"  wegen/paden: {nroad} lijnen")
     # water en zand (scherp afgebakend, al opgehaald voor de stad) bovenop
     for key in ("sand", "water"):
         paint([it["ring"] for it in layers.get(key, [])], key)
@@ -660,6 +687,27 @@ def export_city(slug, spots):
              "pier": pier, "path": path, "dates": dates, "anchors": anchor_xy}
     ddir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(ddir, exist_ok=True)
+    # Wegen/paden voor gewone (niet-terrein) kaarten: gebufferde lijnen als vlakke ringen.
+    # In terreinmodus zitten ze in de kleurtextuur (build_terrain).
+    if os.environ.get("ROADS", "0") == "1" and os.environ.get("TERRAIN", "0") != "1":
+        Wr = {"motorway": 10, "trunk": 10, "primary": 9, "secondary": 8, "tertiary": 7,
+              "unclassified": 6, "residential": 6, "living_street": 5, "service": 3.5,
+              "track": 3.5, "pedestrian": 4, "footway": 2, "path": 2, "cycleway": 2.5,
+              "steps": 2, "bridleway": 2}
+        roads, trails = [], []
+        for _, row in fetch(clat, clon, radius, {"highway": list(Wr)}).iterrows():
+            g = row.geometry
+            hw = str(row.get("highway"))
+            if g is None or g.is_empty or hw not in Wr:
+                continue
+            lines = ([g] if g.geom_type == "LineString"
+                     else list(g.geoms) if g.geom_type == "MultiLineString" else [])
+            dest = trails if hw in ("footway", "path", "cycleway", "steps", "bridleway", "track") else roads
+            for ln in lines:
+                for ring in buffered_rings_local(ln, clat, clon, Wr[hw] / 2):
+                    dest.append({"ring": ring})
+        scene["roads"], scene["trails"] = roads, trails
+        print(f"  wegen: {len(roads)} + paden: {len(trails)}")
     if os.environ.get("COASTAL", "0") == "1":
         sea_rings = build_sea(clat, clon, radius * 2.5)
         scene["sea"] = [{"ring": r} for r in sea_rings]

@@ -28,7 +28,7 @@ FIT_ALL = os.environ.get("FIT_ALL", "0") == "1"
 BRIDGE = os.environ.get("BRIDGE", "0") == "1"
 TERRAIN = os.environ.get("TERRAIN", "0") == "1"
 TEXAG   = float(os.environ.get("TEXAG", 2.2))         # bergen: zelfde overdrijving als de render
-GLB_TEX = int(os.environ.get("GLB_TEX", 1600))        # textuurgrootte terrein in de .glb (px)
+GLB_TEX = int(os.environ.get("GLB_TEX", 2048))        # textuurgrootte terrein in de .glb (px)
 
 EXAG       = 3.2          # zelfde hoogte-overdrijving als de render (look matcht)
 HMAX_M     = 80
@@ -176,6 +176,8 @@ mat_tree  = make_material("Tree", C_TREE, 0.85)
 mat_forest = make_material("Forest", C_FOREST, 0.9)
 mat_bridge = make_material("Bridge", C_BRIDGE, 0.75)
 mat_heart = make_material("DateSpot", C_HEART, 0.4)
+mat_road  = make_material("Road", (0.70, 0.69, 0.66), 0.85)
+mat_trail = make_material("Trail", (0.62, 0.55, 0.45), 0.9)
 
 COASTAL_SLUGS = {"denhaag"}
 _coastal = slug in COASTAL_SLUGS or os.environ.get("COASTAL", "0") == "1"
@@ -361,6 +363,10 @@ elif _coastal and sand and buildings and not terrain:
             (ox + tx*BIG + nx*BIG, oy + ty*BIG + ny*BIG)]
     build_flat([quad], 0.05, mat_sea, "Sea")
 
+if data.get("roads") and not terrain:
+    build_flat([r["ring"] for r in data["roads"]], 0.10, mat_road, "Roads")
+if data.get("trails") and not terrain:
+    build_flat([r["ring"] for r in data["trails"]], 0.11, mat_trail, "Trails")
 if not terrain:     # bij terrein zit dit al in de kleurtextuur
     if sand:
         build_flat([s["ring"] for s in sand], 0.12, mat_sand, "Sand")

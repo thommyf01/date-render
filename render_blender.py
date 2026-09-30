@@ -208,6 +208,8 @@ mat_pitch  = make_material("Pitch", C_PITCH, 0.8, emit=0.14, emit_rgb=C_PITCH)
 mat_rail   = make_material("Rail", C_RAIL, 0.7, emit=0.10, emit_rgb=C_RAIL)
 mat_landmk = make_material("Landmark", C_LANDMK, 0.5, emit=0.30, emit_rgb=C_LANDMK)
 mat_bridge = make_material("Bridge", C_BRIDGE, 0.7, emit=0.12, emit_rgb=C_BRIDGE)
+mat_road  = make_material("Road", (0.70, 0.69, 0.66), 0.8, emit=0.10, emit_rgb=(0.70, 0.69, 0.66))
+mat_trail = make_material("Trail", (0.62, 0.55, 0.45), 0.9, emit=0.10, emit_rgb=(0.62, 0.55, 0.45))
 mat_pin   = make_material("Pin", C_PIN, 0.35, emit=0.5, emit_rgb=C_PIN)
 mat_glow  = make_material("Glow", C_PIN, 0.4, emit=3.0, emit_rgb=(1.0, 0.15, 0.18))
 mat_edge  = make_material("Edge", (0.80, 0.05, 0.08), 0.4, emit=0.8,
@@ -403,6 +405,12 @@ elif _coastal and sand and buildings and not terrain:
 # ── Zand (strand/duin) — boven de zee ──
 if sand and not terrain:
     build_flat([s["ring"] for s in sand], 0.12, mat_sand, "Sand")
+
+# ── Wegen en paden (ROADS=1, niet-terrein; bij terrein zitten ze in de textuur) ──
+if data.get("roads") and not terrain:
+    build_flat([r["ring"] for r in data["roads"]], 0.10, mat_road, "Roads")
+if data.get("trails") and not terrain:
+    build_flat([r["ring"] for r in data["trails"]], 0.11, mat_trail, "Trails")
 
 # ── Groen ──
 if GREEN and not terrain:
